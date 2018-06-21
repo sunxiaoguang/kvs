@@ -1,0 +1,20 @@
+PROJECT_HOME = .
+BUILD_DIR ?= $(PROJECT_HOME)/build/make
+
+include $(BUILD_DIR)/make.defs
+
+CSRCS += cmdline.c select.c
+
+EXETARGET = select
+
+INCLUDE_DIRS += /usr/local/Homebrew/Cellar/openssl/1.0.2o_1/include
+
+LIBRARY_DIRS += /usr/local/Homebrew/Cellar/openssl/1.0.2o_1/lib
+
+DEPLIBS += kvs crypto
+
+OBJS += $(addprefix $(OUTDIR)/,$(CSRCS:.c=$(OBJ_SUFFIX)))
+
+include $(BUILD_DIR)/make.rules
+
+$(BINDIR)/select$(EXE_SUFFIX) : $(OBJS)

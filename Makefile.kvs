@@ -1,0 +1,34 @@
+PROJECT_HOME = .
+BUILD_DIR ?= $(PROJECT_HOME)/build/make
+
+include $(BUILD_DIR)/make.defs
+
+CSRCS += buffer.c interpret.c jit.c prepared.c record.c schema.c variant.c store.c
+
+ifeq ($(THE_OS), darwin)
+	INCLUDE_DIRS += $(LMDB_ROOT)/include
+	LIBRARY_DIRS += $(LMDB_ROOT)/lib
+	LLVM_CONFIG = $(LLVM_ROOT)/bin/llvm-config
+else
+	LLVM_CONFIG = $(shell llvm-config --bindir)/llvm-config
+endif
+
+CPPFLAGS += $(shell $(LLVM_CONFIG) --cppflags)
+CFLAGS += $(shell $(LLVM_CONFIG) --cflags) -std=c99
+CXXFLAGS += $(shell $(LLVM_CONFIG) --cxxflags)
+LDFLAGS += $(shell $(LLVM_CONFIG) --ldflags)
+LDLIBS += $(shell $(LLVM_CONFIG) --libs core engine orcjit passes) $(shell $(LLVM_CONFIG) --system-libs) 
+
+SOTARGET = kvs
+
+DEPLIBS += lmdb
+
+include $(BUILD_DIR)/make.rules
+
+LINKER = $(CXXLINKER)
+
+$(SO_TARGET_PATH): $(BINDIR)/jitrt.bc
+
+$(BINDIR)/jitrt.bc: jitrt.c
+	mkdir -p $(BINDIR)
+	clang $(CPPFLAGS) $(CFLAGS) -emit-llvm -c -o $(BINDIR)/jitrt.bc jitrt.c

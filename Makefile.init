@@ -1,0 +1,21 @@
+PROJECT_HOME = .
+BUILD_DIR ?= $(PROJECT_HOME)/build/make
+
+include $(BUILD_DIR)/make.defs
+
+CSRCS += cmdline.c init.c
+
+EXETARGET = init
+
+ifeq ($(THE_OS), darwin)
+	INCLUDE_DIRS += $(OPENSSL_ROOT)/include
+	LIBRARY_DIRS += $(OPENSSL_ROOT)/lib
+endif
+
+DEPLIBS += kvs crypto
+
+OBJS += $(addprefix $(OUTDIR)/,$(CSRCS:.c=$(OBJ_SUFFIX)))
+
+include $(BUILD_DIR)/make.rules
+
+$(BINDIR)/init$(EXE_SUFFIX) : $(OBJS)
