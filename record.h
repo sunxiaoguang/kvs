@@ -13,6 +13,8 @@ kvs_record *kvs_record_create(kvs_variant **dfts, size_t size);
 void kvs_record_destroy(kvs_record *record);
 kvs_variant **kvs_record_get(kvs_record *record, size_t idx);
 
+size_t kvs_record_fields_offset(void);
+
 #ifdef __cplusplus
 }
 #endif

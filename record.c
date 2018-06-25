@@ -35,3 +35,7 @@ kvs_variant **kvs_record_get(kvs_record *record, size_t idx) {
   }
   return record->fields + idx;
 }
+
+size_t kvs_record_fields_offset(void) {
+  return KVS_OFFSET_OF(kvs_record, fields);
+}

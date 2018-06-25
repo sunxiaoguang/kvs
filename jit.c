@@ -21,6 +21,7 @@
 
 #define KVS_JIT_CHECK_LLVM_ERROR(ERR, X) if ((X) == NULL) { return KVS_SCHEMA_JIT_##ERR; }
 #define KVS_JIT_CHECK_LLVM_ERROR_GOTO(ST, ERR, LABEL, X) if ((X) == NULL) { ST = KVS_SCHEMA_JIT_##ERR ; goto LABEL; }
+#define KVS_JIT_CHECK_NOT_NULL(X) if ((X) == NULL) { return NULL; }
 
 typedef struct llvm_context {
   LLVMModuleRef module;
@@ -50,6 +51,7 @@ typedef struct llvm_context {
   LLVMTypeRef void_type;
   LLVMTypeRef int32_pointer;
   LLVMTypeRef int64_pointer;
+  LLVMValueRef int64_pointer_size;
 
   LLVMValueRef variant_int32_size;
   LLVMValueRef variant_int32_offset;
@@ -62,6 +64,8 @@ typedef struct llvm_context {
   LLVMValueRef variant_opaque_data_offset;
   LLVMValueRef variant_opaque_size_offset;
   LLVMValueRef variant_opaque_size_size;
+
+  LLVMValueRef record_fields_offset;
 
   char name_buffer[512];
   size_t name_len;
@@ -164,6 +168,7 @@ static kvs_status kvs_jit_llvm_context_init(llvm_context *llvm) {
   KVS_JIT_CHECK_LLVM_ERROR(INTERNAL_ERROR, llvm->void_type = LLVMVoidType());
   KVS_JIT_CHECK_LLVM_ERROR(INTERNAL_ERROR, llvm->int32_pointer = LLVMPointerType(llvm->int32_type, 0));
   KVS_JIT_CHECK_LLVM_ERROR(INTERNAL_ERROR, llvm->int64_pointer = LLVMPointerType(llvm->int64_type, 0));
+  KVS_JIT_CHECK_LLVM_ERROR(INTERNAL_ERROR, llvm->int64_pointer_size = LLVMConstInt(llvm->int64_type, sizeof(int64_t), 0));
   LLVMTypeRef params[] = {
     llvm->int64_type, /* record */
     llvm->int64_type, /* kvs_buffer *key */
@@ -197,6 +202,8 @@ static kvs_status kvs_jit_llvm_context_init(llvm_context *llvm) {
   KVS_JIT_CHECK_LLVM_ERROR(INTERNAL_ERROR, llvm->variant_opaque_data_offset = LLVMConstInt(llvm->int64_type, kvs_variant_opaque_data_offset(), 0));
   KVS_JIT_CHECK_LLVM_ERROR(INTERNAL_ERROR, llvm->variant_opaque_size_offset = LLVMConstInt(llvm->int64_type, kvs_variant_opaque_size_offset(), 0));
   KVS_JIT_CHECK_LLVM_ERROR(INTERNAL_ERROR, llvm->variant_opaque_size_size = LLVMConstInt(llvm->int64_type, sizeof(int32_t), 0));
+
+  KVS_JIT_CHECK_LLVM_ERROR(INTERNAL_ERROR, llvm->record_fields_offset = LLVMConstInt(llvm->int64_type, kvs_record_fields_offset(), 0));
   return KVS_OK;
 }
 
@@ -226,7 +233,7 @@ static const char *llvm_serialize_name(llvm_context *llvm, const char *fmt, ...)
 }
 
 static kvs_status kvs_schema_jit_generate_primitive_serializer(llvm_context *llvm, LLVMBuilderRef builder, LLVMValueRef buffer, LLVMValueRef field, LLVMValueRef offset, LLVMValueRef size) {
-  LLVMValueRef data = LLVMBuildAdd(builder, field, offset, llvm_name_with_suffix(llvm, "@primitie_address"));
+  LLVMValueRef data = LLVMBuildAdd(builder, field, offset, llvm_name_with_suffix(llvm, "@primitive_address"));
   KVS_JIT_CHECK_LLVM_ERROR(INTERNAL_ERROR, data);
   LLVMValueRef buffer_write_args[] = { buffer, data, size };
   KVS_JIT_CHECK_LLVM_ERROR(INTERNAL_ERROR, LLVMBuildCall(builder, llvm->buffer_write, buffer_write_args, KVS_ARRAY_SIZE(buffer_write_args), ""));
@@ -262,7 +269,7 @@ static kvs_status kvs_schema_jit_generate_primitive_deserializer(llvm_context *l
   KVS_JIT_CHECK_LLVM_ERROR(INTERNAL_ERROR, data_address_ptr);
   LLVMValueRef data_address = LLVMBuildLoad(builder, data_address_ptr, llvm_name_with_suffix(llvm, "@address"));
   KVS_JIT_CHECK_LLVM_ERROR(INTERNAL_ERROR, data_address);
-  LLVMValueRef data = LLVMBuildAdd(builder, data_address, offset, llvm_name_with_suffix(llvm, "@primitie_address"));
+  LLVMValueRef data = LLVMBuildAdd(builder, data_address, offset, llvm_name_with_suffix(llvm, "@primitive_address"));
   KVS_JIT_CHECK_LLVM_ERROR(INTERNAL_ERROR, data);
   LLVMValueRef buffer_read_args[] = { buffer, data, size };
   KVS_JIT_CHECK_LLVM_ERROR(INTERNAL_ERROR, LLVMBuildCall(builder, llvm->buffer_read, buffer_read_args, KVS_ARRAY_SIZE(buffer_read_args), ""));
@@ -328,6 +335,21 @@ static kvs_status kvs_schema_jit_compile(llvm_context *llvm) {
   }
 }
 
+static LLVMValueRef kvs_schema_jit_codec_generate_record_get(llvm_context *llvm, LLVMBuilderRef builder, LLVMValueRef fields_array_address, LLVMValueRef field_index) {
+  LLVMValueRef offset = LLVMBuildMul(builder, llvm->int64_pointer_size, field_index, llvm_name_with_suffix(llvm, "@fields_array_offset"));
+  KVS_JIT_CHECK_NOT_NULL(offset);
+  LLVMValueRef field_address = LLVMBuildAdd(builder, fields_array_address, offset, llvm_name_with_suffix(llvm, "@field_pointer_address"));
+  return field_address;
+}
+
+static LLVMValueRef kvs_schema_jit_codec_generate_record_get_deref(llvm_context *llvm, LLVMBuilderRef builder, LLVMValueRef fields_array_address, LLVMValueRef field_index) {
+  LLVMValueRef field_ptr_address = kvs_schema_jit_codec_generate_record_get(llvm, builder, fields_array_address, field_index);
+  KVS_JIT_CHECK_NOT_NULL(field_ptr_address);
+  LLVMValueRef field_ptr_address_ptr = LLVMBuildIntToPtr(builder, field_ptr_address, llvm->int64_pointer, llvm_name_with_suffix(llvm, "@field_pointer_address_pointer"));
+  KVS_JIT_CHECK_NOT_NULL(field_ptr_address_ptr);
+  return LLVMBuildLoad(builder, field_ptr_address_ptr, llvm_name_with_suffix(llvm, "@field_pointer"));
+}
+
 void *kvs_schema_jit_codec_create(const kvs_column **keys, size_t key_size, const kvs_column **values, size_t value_size) {
   size_t idx;
   kvs_status st;
@@ -348,14 +370,19 @@ void *kvs_schema_jit_codec_create(const kvs_column **keys, size_t key_size, cons
   KVS_JIT_CHECK_LLVM_ERROR_GOTO(st, INTERNAL_ERROR, cleanup_exit, key);
   LLVMValueRef value = LLVMGetParam(serializer, 2);
   KVS_JIT_CHECK_LLVM_ERROR_GOTO(st, INTERNAL_ERROR, cleanup_exit, value);
+  LLVMValueRef fields_address = LLVMBuildAdd(builder, record, llvm->record_fields_offset, "fields_address");
+  KVS_JIT_CHECK_LLVM_ERROR_GOTO(st, INTERNAL_ERROR, cleanup_exit, fields_address);
+  LLVMValueRef fields_address_ptr = LLVMBuildIntToPtr(builder, fields_address, llvm->int64_pointer, "fields_address_pointer");
+  KVS_JIT_CHECK_LLVM_ERROR_GOTO(st, INTERNAL_ERROR, cleanup_exit, fields_address_ptr);
+  LLVMValueRef fields_array_address = LLVMBuildLoad(builder, fields_address_ptr, "fields_array_address");
+  KVS_JIT_CHECK_LLVM_ERROR_GOTO(st, INTERNAL_ERROR, cleanup_exit, fields_array_address);
 
   for (idx = 0; idx < key_size; ++idx) {
     const kvs_column *column = keys[idx];
     LLVMValueRef field_index = LLVMConstInt(llvm->int64_type, column->index, 0);
     KVS_JIT_CHECK_LLVM_ERROR_GOTO(st, INTERNAL_ERROR, cleanup_exit, field_index);
-    LLVMValueRef record_get_args[] = { record, field_index };
-    LLVMValueRef field = LLVMBuildCall(builder, llvm->record_get, record_get_args, KVS_ARRAY_SIZE(record_get_args),
-        llvm_serialize_name(llvm, "pk@%zd", idx));
+    llvm_serialize_name(llvm, "pk@%zd", idx);
+    LLVMValueRef field = kvs_schema_jit_codec_generate_record_get(llvm, builder, fields_array_address, field_index);
     KVS_JIT_CHECK_LLVM_ERROR_GOTO(st, INTERNAL_ERROR, cleanup_exit, field);
     LLVMValueRef serialize_args[] = { field, key };
     switch (column->type) {
@@ -388,9 +415,8 @@ void *kvs_schema_jit_codec_create(const kvs_column **keys, size_t key_size, cons
     const kvs_column *column = values[idx];
     LLVMValueRef field_index = LLVMConstInt(llvm->int64_type, column->index, 0);
     KVS_JIT_CHECK_LLVM_ERROR_GOTO(st, INTERNAL_ERROR, cleanup_exit, field_index);
-    LLVMValueRef record_get_args[] = { record, field_index };
-    LLVMValueRef field = LLVMBuildCall(builder, llvm->record_get_deref, record_get_args, KVS_ARRAY_SIZE(record_get_args),
-        llvm_serialize_name(llvm, "column@%zd", idx));
+    llvm_serialize_name(llvm, "column@%zd", idx);
+    LLVMValueRef field = kvs_schema_jit_codec_generate_record_get_deref(llvm, builder, fields_array_address, field_index);
     KVS_JIT_CHECK_LLVM_ERROR_GOTO(st, INTERNAL_ERROR, cleanup_exit, field);
     switch (column->type) {
       case KVS_VARIANT_TYPE_INT32:
@@ -422,14 +448,16 @@ void *kvs_schema_jit_codec_create(const kvs_column **keys, size_t key_size, cons
   KVS_JIT_CHECK_LLVM_ERROR_GOTO(st, INTERNAL_ERROR, cleanup_exit, record = LLVMGetParam(deserializer, 0));
   KVS_JIT_CHECK_LLVM_ERROR_GOTO(st, INTERNAL_ERROR, cleanup_exit, key = LLVMGetParam(deserializer, 1));
   KVS_JIT_CHECK_LLVM_ERROR_GOTO(st, INTERNAL_ERROR, cleanup_exit, value = LLVMGetParam(deserializer, 2));
+  KVS_JIT_CHECK_LLVM_ERROR_GOTO(st, INTERNAL_ERROR, cleanup_exit, fields_address = LLVMBuildAdd(builder, record, llvm->record_fields_offset, "fields_address"));
+  KVS_JIT_CHECK_LLVM_ERROR_GOTO(st, INTERNAL_ERROR, cleanup_exit, fields_address_ptr = LLVMBuildIntToPtr(builder, fields_address, llvm->int64_pointer, "fields_address_pointer"));
+  KVS_JIT_CHECK_LLVM_ERROR_GOTO(st, INTERNAL_ERROR, cleanup_exit, fields_array_address = LLVMBuildLoad(builder, fields_address_ptr, "fields_array_address"));
 
   for (idx = 0; idx < key_size; ++idx) {
     const kvs_column *column = keys[idx];
     LLVMValueRef field_index = LLVMConstInt(llvm->int64_type, column->index, 0);
     KVS_JIT_CHECK_LLVM_ERROR_GOTO(st, INTERNAL_ERROR, cleanup_exit, field_index);
-    LLVMValueRef record_get_args[] = { record, field_index };
-    LLVMValueRef field = LLVMBuildCall(builder, llvm->record_get, record_get_args, KVS_ARRAY_SIZE(record_get_args),
-        llvm_serialize_name(llvm, "pk@%zd", idx));
+    llvm_serialize_name(llvm, "pk@%zd", idx);
+    LLVMValueRef field = kvs_schema_jit_codec_generate_record_get(llvm, builder, fields_array_address, field_index);
     KVS_JIT_CHECK_LLVM_ERROR_GOTO(st, INTERNAL_ERROR, cleanup_exit, field);
     LLVMValueRef deserialize_args[] = { field, key };
     switch (column->type) {
@@ -462,9 +490,8 @@ void *kvs_schema_jit_codec_create(const kvs_column **keys, size_t key_size, cons
     const kvs_column *column = values[idx];
     LLVMValueRef field_index = LLVMConstInt(llvm->int64_type, column->index, 0);
     KVS_JIT_CHECK_LLVM_ERROR_GOTO(st, INTERNAL_ERROR, cleanup_exit, field_index);
-    LLVMValueRef record_get_args[] = { record, field_index };
-    LLVMValueRef field = LLVMBuildCall(builder, llvm->record_get, record_get_args, KVS_ARRAY_SIZE(record_get_args),
-        llvm_serialize_name(llvm, "column@%zd", idx));
+    llvm_serialize_name(llvm, "column@%zd", idx);
+    LLVMValueRef field = kvs_schema_jit_codec_generate_record_get(llvm, builder, fields_array_address, field_index);
     KVS_JIT_CHECK_LLVM_ERROR_GOTO(st, INTERNAL_ERROR, cleanup_exit, field);
     switch (column->type) {
       case KVS_VARIANT_TYPE_INT32:
@@ -489,6 +516,7 @@ void *kvs_schema_jit_codec_create(const kvs_column **keys, size_t key_size, cons
         break;
     }
   }
+
   KVS_JIT_CHECK_LLVM_ERROR_GOTO(st, INTERNAL_ERROR, cleanup_exit, LLVMBuildRetVoid(builder));
   LLVMDisposeBuilder(builder);
   KVS_DO_GOTO(st, cleanup_exit, kvs_schema_jit_compile(llvm));
